@@ -143,7 +143,7 @@ class ACR122_Reader(Smartcard_Reader):
         self._current_target_number = 0
     
     def pn532_transceive_raw(self, command):
-        c_apdu = "\xff\x00\x00\x00" + chr(len(command)) + command
+        c_apdu = "\xff\x00\x00" + chr((len(command) >> 8)) + chr(len(command) % 256) + command
         r_apdu = self._parent.transceive(c_apdu)
         
         if len(r_apdu) == 2 and r_apdu[0] == "\x61":

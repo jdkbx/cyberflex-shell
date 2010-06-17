@@ -129,6 +129,13 @@ def _make_byte_property(prop):
             lambda self: delattr(self, "_"+prop),
             "The %s attribute of the APDU" % prop)
 
+def _make_bool_property(prop):
+    "Make a bool property(). This is meta code."
+    return property(lambda self: getattr(self, "_"+prop, getattr(self, "_DEFAULT_"+prop, None)),
+            lambda self, value: self._setbool(prop, value), 
+            lambda self: delattr(self, "_"+prop),
+            "The %s attribute of the APDU" % prop)
+
 class APDU(object):
     "Base class for an APDU"
     
@@ -201,6 +208,13 @@ class APDU(object):
         else:
             raise ValueError, "'%s' attribute can only be a byte, that is: int or str, not %s" % (namelower, type(value))
 
+    def _setbool(self, name, value):
+        #print "setbool(%r, %r)" % (name, value)
+        if isinstance(value, bool):
+            setattr(self, "_"+name, value)
+        else:
+            raise ValueError, "'%s' attribute can only be a bool, not %s" % (namelower, type(value))
+
     def _format_parts(self, fields):
         "utility function to be used in __str__ and __repr__"
         
@@ -239,19 +253,37 @@ class C_APDU(APDU):
         apdu = apdu + [0] * max(4-len(apdu), 0)
         
         self.CLA, self.INS, self.P1, self.P2 = apdu[:4] # case 1, 2, 3, 4
+	self.ext = False
         if len(apdu) == 5:                              # case 2
             self.Le = apdu[-1]
             self.data = ""
+	elif len(apdu) == 7 and apdu[4] == 0x00:	# case 2 extended
+	    self.Le = apdu[6]
+	    self.Le += apdu[5] << 8
+	    self.data = ""
+	    self.ext = True
         elif len(apdu) > 5:                             # case 3, 4
-            self.Lc = apdu[4]
-            if len(apdu) == 5 + self.Lc:                # case 3
-                self.data = apdu[5:]
-            elif len(apdu) == 5 + self.Lc + 1:          # case 4
-                self.data = apdu[5:-1]
-                self.Le = apdu[-1]
-            else:
-                raise ValueError, "Invalid Lc value. Is %s, should be %s or %s" % (self.Lc,
-                    5 + self.Lc, 5 + self.Lc + 1)
+	    if apdu[4] == 0x00:				# lc extended
+	        self.Lc = apdu[6]
+		self.Lc += apdu[5] << 8
+                self.data = apdu[7:7 + self.Lc]
+		self.ext = True
+	        if 4 + 3 + self.Lc + 2 == len(apdu):	# case 4 extended
+	            self.Le = apdu[-1]
+		    self.Le += apdu[-2] << 8 #[7 + self.Lc:]
+                elif 4 + 3 + self.Lc != len(apdu):	# case 3 extended
+	            raise ValueError, "Invalid extended Lc value. Is %s, should be %s or %s" % (self.Lc,
+                        len(apdu) - 7, len(apdu) - (7 + 2))
+	    else:
+                self.Lc = apdu[4]
+                if len(apdu) == 5 + self.Lc:            # case 3
+                    self.data = apdu[5:]
+                elif len(apdu) == 5 + self.Lc + 1:      # case 4
+                    self.data = apdu[5:-1]
+                    self.Le = apdu[-1]
+                else:
+                    raise ValueError, "Invalid Lc value. Is %s, should be %s or %s" % (self.Lc,
+                        len(apdu) - 5, len(apdu) - (5 + 1))
         else:                                           # case 1
             self.data = ""
     
@@ -261,6 +293,7 @@ class C_APDU(APDU):
     P2 = _make_byte_property("P2");   p2 = P2
     Lc = _make_byte_property("Lc");   lc = Lc
     Le = _make_byte_property("Le");   le = Le
+    Ext = _make_bool_property("Ext");   ext = Ext
     
     def _format_fields(self):
         fields = ["CLA", "INS", "P1", "P2"]
@@ -278,32 +311,57 @@ class C_APDU(APDU):
         for i in self.CLA, self.INS, self.P1, self.P2:
             buffer.append(chr(i))
         
-        if len(self.data) > 0:
-            buffer.append(chr(self.Lc))
-            buffer.append(self.data)
+	if self.Ext == False:
+            if len(self.data) > 0:
+                buffer.append(chr(self.Lc))
+                buffer.append(self.data)
         
-        if hasattr(self, "_Le"):
-            buffer.append(chr(self.Le))
+            if hasattr(self, "_Le"):
+                buffer.append(chr(self.Le))
+	else:
+	    if len(self.data) > 0:
+	        buffer.append(chr(0x0))
+		buffer.append(chr(self.Lc >> 8))
+                buffer.append(chr(self.Lc & 0xFF))
+                buffer.append(self.data)
+        
+            if hasattr(self, "_Le"):
+	        if len(self.data) == 0:
+	            buffer.append(chr(0x0))
+		buffer.append(chr(self.Le >> 8))
+                buffer.append(chr(self.Le & 0xFF))
         
         return "".join(buffer)
     
     def case(self):
-        "Return 1, 2, 3 or 4, depending on which ISO case we represent."
-        if self.Lc == 0:
-            if not hasattr(self, "_Le"):
-                return 1
+        "Return 1, 2, 3 or 4, depending on which ISO case we represent.	Add 4 in case of extended APDU."
+	if self.Ext == False:
+            if self.Lc == 0:
+                if not hasattr(self, "_Le"):
+                    return 1
+                else:
+                    return 2
             else:
-                return 2
-        else:
-            if not hasattr(self, "_Le"):
-                return 3
+                if not hasattr(self, "_Le"):
+                    return 3
+                else:
+                    return 4
+	else:
+	    if self.Lc == 0:
+                if not hasattr(self, "_Le"):
+                    return 5 #? kind of senseless
+                else:
+                    return 6
             else:
-                return 4
+                if not hasattr(self, "_Le"):
+                    return 7
+                else:
+                    return 8
     
     _apduregex = re.compile(r'^\s*([0-9a-f]{2}\s*){4,}$', re.I)
     _fancyapduregex = re.compile(r'^\s*([0-9a-f]{2}\s*){4,}\s*((xx|yy)\s*)?(([0-9a-f]{2}|:|\)|\(|\[|\])\s*)*$', re.I)
     @staticmethod
-    def parse_fancy_apdu(*args):
+    def parse_fancy_apdu(ext, *args):
         apdu_string = " ".join(args)
         if not C_APDU._fancyapduregex.match(apdu_string):
             raise ValueError
@@ -351,8 +409,10 @@ class C_APDU(APDU):
                         self.length = self.length + len(child)
                     else:
                         child.calculate_lengths()
-                        
-                        formatted_len = binascii.a2b_hex("%02x" % child.length) ## FIXME len > 255?
+			if child.length < 256:
+                            formatted_len = binascii.a2b_hex("%02x" % child.length) 
+			else:
+			    formatted_len = binascii.a2b_hex("%04x" % child.length)
                         self.length = self.length + len(formatted_len) + child.length
                         self.insert(index, formatted_len)
                         index = index + 1
@@ -414,9 +474,15 @@ class C_APDU(APDU):
         apdu_head = apdu_head.strip()
         if apdu_head != "":
             l = tree.length
-            if have_le: 
-                l = l - 1 ## FIXME Le > 255?
-            formatted_len = "%02x" % l  ## FIXME len > 255?
+            if have_le:
+	        if ext == True:
+                    l = l - 2
+                else:
+                    l = l - 1
+	    if ext == True:
+	        formatted_len = "%06x" % l
+	    else:
+                formatted_len = "%02x" % l
             apdu_head = binascii.a2b_hex("".join( (apdu_head + formatted_len).split() ))
         
         apdu_tail, marks = tree.flatten(offset=0)
